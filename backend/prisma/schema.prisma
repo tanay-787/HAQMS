@@ -86,6 +86,8 @@ model Appointment {
 
   // MISSING INDEX: No index on (doctorId, status) — important for worklist queries.
   // MISSING INDEX: No index on patientId foreign key.
+  // Fix applied: DB-level guard to prevent duplicate doctor bookings at exact same timestamp.
+  @@unique([doctorId, appointmentDate])
   queueTokens QueueToken[]
 }
 

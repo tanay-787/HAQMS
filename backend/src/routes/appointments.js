@@ -103,6 +103,11 @@ router.post('/', authenticate, async (req, res) => {
       appointment,
     });
   } catch (error) {
+    if (error.code === 'P2002') {
+      return res.status(409).json({
+        error: 'Doctor already has an appointment in this slot.',
+      });
+    }
     res.status(500).json({ error: 'Failed to book appointment', details: error.message });
   }
 });
