@@ -14,9 +14,12 @@ const reportRoutes = require('./routes/reports');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const CORS_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:3000';
 
-// Enable CORS for all origins (weak/broad CORS config)
-app.use(cors());
+// Enable CORS
+app.use(cors({
+  origin: CORS_ORIGIN,
+}));
 
 // Body parser
 app.use(express.json());
@@ -40,19 +43,25 @@ app.get('/', (req, res) => {
   res.json({
     message: 'Hospital Appointment and Queue Management System (HAQMS) Backend API',
     status: 'Running',
-    version: '1.0.0-deliberate-bugs'
+    version: '1.0.0'
+  });
+});
+
+// 404 handler for unknown API routes
+app.use('/api/*', (req, res) => {
+  return res.status(404).json({
+    success: false,
+    error: 'API route not found',
   });
 });
 
 // GLOBAL ERROR HANDLER
-// BUG: Improper error handling. It returns the raw error stack trace to the client,
-// which leaks details about database types, schema layout, and file paths.
 app.use((err, req, res, next) => {
   console.error('[CRITICAL-ERROR]:', err);
-  res.status(500).json({
-    message: 'An unexpected internal server error occurred!',
-    error: err.message,
-    stack: process.env.NODE_ENV === 'development' ? err.stack : undefined,
+
+  return res.status(500).json({
+    success: false,
+    error: 'Internal server error',
   });
 });
 
