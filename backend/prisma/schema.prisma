@@ -94,6 +94,7 @@ model Appointment {
 model QueueToken {
   id            String      @id @default(uuid())
   tokenNumber   Int
+  tokenDate     DateTime
   patientId     String
   patient       Patient     @relation(fields: [patientId], references: [id])
   doctorId      String
@@ -103,8 +104,9 @@ model QueueToken {
   status        QueueStatus @default(WAITING)
   createdAt     DateTime    @default(now())
 
+  // Added tokenDate + uniqueness to prevent duplicate tokenNumbers per doctor per day.
+  @@unique([doctorId, tokenDate, tokenNumber])
+
   // MISSING INDEX: No index on (doctorId, createdAt) — used in daily token aggregation.
   // MISSING INDEX: No index on status — used in frequent status filter queries.
-  // SCHEMA BUG: No unique constraint on (doctorId, tokenNumber, date) —
-  // race condition in checkin route can produce duplicate token numbers for the same doctor+day.
 }

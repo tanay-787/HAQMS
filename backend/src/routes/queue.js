@@ -43,47 +43,60 @@ router.post('/checkin', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'Patient and Doctor ID are required for check-in.' });
     }
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    // Normalize to date-only for per-day token allocation
+    const tokenDate = new Date();
+    tokenDate.setHours(0, 0, 0, 0);
 
-    // 1. Fetch current maximum token number for this doctor today
-    const maxTokenResult = await prisma.queueToken.aggregate({
-      where: {
-        doctorId,
-        createdAt: { gte: today },
-      },
-      _max: {
-        tokenNumber: true,
-      },
-    });
+    const maxRetries = 5;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      // 1. Fetch current maximum token number for this doctor on this date
+      const maxTokenResult = await prisma.queueToken.aggregate({
+        where: {
+          doctorId,
+          tokenDate,
+        },
+        _max: {
+          tokenNumber: true,
+        },
+      });
 
-    const currentMax = maxTokenResult._max.tokenNumber || 0;
-    const nextTokenNumber = currentMax + 1;
+      const currentMax = maxTokenResult._max.tokenNumber || 0;
+      const nextTokenNumber = currentMax + 1;
 
-    // PERFORMANCE/CONCURRENCY BUG: Artificial sleep to widen the race condition window.
-    // In production under microservices or high load, network delay does this naturally.
-    // Junior developer comment: "Adding sleep to make sure db registers the record correctly before moving forward"
-    await new Promise((resolve) => setTimeout(resolve, 350));
+      // 2. Try to insert new token. If a concurrent request inserted the same token
+      // a unique constraint violation (P2002) will occur and we retry.
+      try {
+        const newToken = await prisma.queueToken.create({
+          data: {
+            tokenNumber: nextTokenNumber,
+            tokenDate,
+            patientId,
+            doctorId,
+            appointmentId: appointmentId || null,
+            status: 'WAITING',
+          },
+          include: {
+            patient: true,
+            doctor: true,
+          },
+        });
 
-    // 2. Insert new token
-    const newToken = await prisma.queueToken.create({
-      data: {
-        tokenNumber: nextTokenNumber,
-        patientId,
-        doctorId,
-        appointmentId: appointmentId || null,
-        status: 'WAITING',
-      },
-      include: {
-        patient: true,
-        doctor: true,
-      },
-    });
+        return res.status(201).json({
+          message: 'Checked in successfully. Token generated.',
+          token: newToken,
+        });
+      } catch (error) {
+        // Unique constraint violation: another concurrent request inserted same token
+        if (error.code === 'P2002') {
+          // Small randomized backoff then retry
+          await new Promise((r) => setTimeout(r, 50 + Math.floor(Math.random() * 150)));
+          continue;
+        }
+        throw error;
+      }
+    }
 
-    res.status(201).json({
-      message: 'Checked in successfully. Token generated.',
-      token: newToken,
-    });
+    return res.status(500).json({ error: 'Failed to allocate token after multiple attempts' });
   } catch (error) {
     console.error('Queue check-in error:', error);
     res.status(500).json({ error: 'Check-in failed', details: error.message });
