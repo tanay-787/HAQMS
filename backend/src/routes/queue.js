@@ -1,19 +1,40 @@
 const express = require('express');
 const { PrismaClient } = require('@prisma/client');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, authorize } = require('../middleware/auth');
 
 const router = express.Router();
 const prisma = new PrismaClient();
+const VALID_QUEUE_STATUSES = ['WAITING', 'CALLING', 'COMPLETED', 'SKIPPED'];
 
 // GET /api/queue
 // List all active queue tokens
-router.get('/', authenticate, async (req, res) => {
+router.get(
+  '/',
+  authenticate,
+  authorize(['DOCTOR', 'RECEPTIONIST', 'ADMIN']),
+  async (req, res) => {
   try {
     const { doctorId, status } = req.query;
+    const tokenDate = new Date();
+    tokenDate.setHours(0, 0, 0, 0);
 
-    const where = {};
+    const where = {
+      tokenDate,
+    };
+
+    // Default to active queue items only
+    where.status = {
+      in: ['WAITING', 'CALLING'],
+    };
+
     if (doctorId) where.doctorId = doctorId;
-    if (status) where.status = status;
+
+    if (status) {
+      if (!VALID_QUEUE_STATUSES.includes(status)) {
+        return res.status(400).json({ error: 'Invalid queue status filter' });
+      }
+      where.status = status;
+    }
 
     const tokens = await prisma.queueToken.findMany({
       where,
@@ -21,26 +42,60 @@ router.get('/', authenticate, async (req, res) => {
         patient: true,
         doctor: true,
       },
-      orderBy: { createdAt: 'asc' },
+      orderBy: { tokenNumber: 'asc' },
     });
 
-    res.json(tokens);
+    return res.json(tokens);
   } catch (error) {
-    res.status(500).json({ error: 'Failed to retrieve queue', details: error.message });
+    console.error('Get queue error:', error);
+    return res.status(500).json({ error: 'Failed to retrieve queue' });
   }
 });
 
 // POST /api/queue/checkin
 // Generate a new queue token for a patient
-// CONCURRENCY/RACE CONDITION BUG: Token increment uses aggregate read followed by create.
-// Introduce a deliberate asynchronous delay (setTimeout) to force a wide race window
-// where concurrent check-ins assign the exact same token number.
-router.post('/checkin', authenticate, async (req, res) => {
+router.post(
+  '/checkin',
+  authenticate,
+  authorize(['RECEPTIONIST', 'ADMIN']),
+  async (req, res) => {
   try {
     const { patientId, doctorId, appointmentId } = req.body;
 
     if (!patientId || !doctorId) {
-      return res.status(400).json({ error: 'Patient and Doctor ID are required for check-in.' });
+      return res.status(400).json({ error: 'Patient and doctor ID are required for check-in.' });
+    }
+
+    const patient = await prisma.patient.findUnique({
+      where: { id: patientId },
+    });
+
+    if (!patient) {
+      return res.status(404).json({ error: 'Patient not found' });
+    }
+
+    const doctor = await prisma.doctor.findUnique({
+      where: { id: doctorId },
+    });
+
+    if (!doctor) {
+      return res.status(404).json({ error: 'Doctor not found' });
+    }
+
+    if (appointmentId) {
+      const appointment = await prisma.appointment.findUnique({
+        where: { id: appointmentId },
+      });
+
+      if (!appointment) {
+        return res.status(404).json({ error: 'Appointment not found' });
+      }
+
+      if (appointment.patientId !== patientId || appointment.doctorId !== doctorId) {
+        return res.status(400).json({
+          error: 'Appointment does not belong to the provided patient and doctor.',
+        });
+      }
     }
 
     // Normalize to date-only for per-day token allocation
@@ -99,18 +154,44 @@ router.post('/checkin', authenticate, async (req, res) => {
     return res.status(500).json({ error: 'Failed to allocate token after multiple attempts' });
   } catch (error) {
     console.error('Queue check-in error:', error);
-    res.status(500).json({ error: 'Check-in failed', details: error.message });
+    return res.status(500).json({ error: 'Check-in failed' });
   }
 });
 
 // PATCH /api/queue/:id
 // Update token status (WAITING -> CALLING -> COMPLETED / SKIPPED)
-router.patch('/:id', authenticate, async (req, res) => {
+router.patch(
+  '/:id',
+  authenticate,
+  authorize(['DOCTOR', 'ADMIN']),
+  async (req, res) => {
   try {
     const { status } = req.body;
 
     if (!status) {
       return res.status(400).json({ error: 'Status is required' });
+    }
+
+    if (!VALID_QUEUE_STATUSES.includes(status)) {
+      return res.status(400).json({ error: 'Invalid status value' });
+    }
+
+    const existingToken = await prisma.queueToken.findUnique({
+      where: { id: req.params.id },
+    });
+
+    if (!existingToken) {
+      return res.status(404).json({ error: 'Queue token not found' });
+    }
+
+    if (
+      (existingToken.status === 'WAITING' && !['CALLING', 'SKIPPED'].includes(status)) ||
+      (existingToken.status === 'CALLING' && !['COMPLETED', 'SKIPPED'].includes(status)) ||
+      ['COMPLETED', 'SKIPPED'].includes(existingToken.status)
+    ) {
+      return res.status(400).json({
+        error: `Invalid status transition from ${existingToken.status} to ${status}`,
+      });
     }
 
     const updatedToken = await prisma.queueToken.update({
@@ -122,9 +203,10 @@ router.patch('/:id', authenticate, async (req, res) => {
       },
     });
 
-    res.json(updatedToken);
+    return res.json(updatedToken);
   } catch (error) {
-    res.status(500).json({ error: 'Failed to update queue token', details: error.message });
+    console.error('Update queue token error:', error);
+    return res.status(500).json({ error: 'Failed to update queue token' });
   }
 });
 
